@@ -11,8 +11,19 @@ android {
         applicationId = "app.scrobbler"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
+    }
+
+    // Один и тот же ключ подписи при каждой сборке: тогда новые APK ставятся поверх старых
+    // без удаления приложения. Это обычный отладочный ключ, для личного использования достаточно.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {

@@ -38,7 +38,7 @@
 
     <div class="field">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
-      <input id="q" type="search" placeholder="Трек или артист" enterkeyhint="search" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <input id="q" type="search" placeholder="Трек или ссылка Spotify" enterkeyhint="search" autocomplete="off" autocapitalize="off" spellcheck="false">
       <button id="btn-search" class="btn primary sm">Найти</button>
     </div>
 
@@ -46,10 +46,18 @@
       <i class="thumb"></i>
       <button data-mode="track" class="on">Трек</button>
       <button data-mode="artist">Артист</button>
+      <button data-mode="album">Альбом</button>
+      <button data-mode="playlist">Плейлист</button>
+    </div>
+
+    <div id="sp-login" class="card glass" hidden>
+      <h3>Плейлисты Spotify</h3>
+      <p class="plain">Чтобы читать плейлисты, нужно один раз войти в Spotify. Пароль приложение не видит: вход идёт на сайте Spotify.</p>
+      <button id="btn-sp-login-search" class="btn primary wide">Войти в Spotify</button>
     </div>
 
     <div class="card glass row-card">
-      <span>Скробблов на трек</span>
+      <span id="add-label">Скробблов на трек</span>
       <div class="stepper">
         <button id="add-dec" class="rbtn" aria-label="Меньше"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 12h12"/></svg></button>
         <b id="add-count">1</b>
@@ -58,6 +66,7 @@
     </div>
 
     <div id="results" class="list glass"></div>
+    <p id="results-note" class="hint" hidden></p>
     <button id="btn-more" class="btn wide" hidden>Ещё 10</button>
   </section>
 
@@ -123,11 +132,21 @@
       <div class="field slim"><input id="in-sp-id" type="text" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
       <label class="lbl" for="in-sp-secret">Client Secret</label>
       <div class="field slim"><input id="in-sp-secret" type="password" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
-      <p class="hint">Нужен только для поиска по каталогу. С февраля 2026 владелец приложения Spotify в Development Mode должен иметь Premium.
+      <p class="hint">Для поиска треков и альбомов хватает этих двух ключей. С февраля 2026 владелец приложения Spotify в Development Mode должен иметь Premium.
         <a href="https://developer.spotify.com/dashboard" data-open>Получить ключи</a></p>
     </div>
 
-    <p class="foot">Last.fm может счесть искусственные скробблы нарушением правил сервиса, поэтому для основного аккаунта это риск.</p>
+    <div class="card glass">
+      <h3>Spotify: плейлисты</h3>
+      <div id="sp-auth-state" class="auth-state"></div>
+      <button id="btn-sp-login" class="btn primary wide">Войти в Spotify</button>
+      <button id="btn-sp-logout" class="btn wide" hidden>Выйти из Spotify</button>
+      <p class="hint">Альбомы работают без входа. Плейлисты Spotify отдаёт только вашему аккаунту и только свои и совместные.
+        Перед первым входом добавьте в настройках вашего приложения на сайте Spotify (поле Redirect URIs) адрес:</p>
+      <button id="btn-copy-redirect" class="copy" type="button"><code id="redirect-uri">scrobbler://callback</code><span>скопировать</span></button>
+    </div>
+
+    <p class="foot">Версия 1.1. Last.fm может счесть искусственные скробблы нарушением правил сервиса, поэтому для основного аккаунта это риск.</p>
   </section>
 
 </main>

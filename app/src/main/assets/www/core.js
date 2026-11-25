@@ -14,7 +14,12 @@
   var LASTFM_API = "https://ws.audioscrobbler.com/2.0/";
   var LASTFM_AUTH_URL = "https://www.last.fm/api/auth/";
   var SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token";
-  var SPOTIFY_SEARCH_URL = "https://api.spotify.com/v1/search";
+  var SPOTIFY_AUTH_URL = "https://accounts.spotify.com/authorize";
+  var SPOTIFY_API = "https://api.spotify.com/v1";
+  // этот адрес нужно добавить в Redirect URIs приложения на developer.spotify.com/dashboard
+  var SPOTIFY_REDIRECT_URI = "scrobbler://callback";
+  var SPOTIFY_SCOPES = "playlist-read-private playlist-read-collaborative";
+  var MAX_COLLECTION_TRACKS = 1000;   // предохранитель для огромных плейлистов
 
   var BATCH_SIZE = 50;            // максимум скробблов в одном запросе track.scrobble
   var PAGE_SIZE = 10;             // максимум результатов поиска Spotify (с февраля 2026)
@@ -83,12 +88,61 @@
     return dt.getTime();
   }
 
+  // ---- очередь: одиночные треки и целые альбомы / плейлисты ---------------------
+  // Элемент очереди: {track, count} — один трек count раз,
+  //                  {kind: "album"|"playlist", id, name, sub, cover, tracks: [...], count} —
+  //                  вся коллекция целиком count раз подряд (трек 1…N, потом снова 1…N).
+
+  function itemTracks(q) { return q.tracks || (q.track ? [q.track] : []); }
+  function isCollection(q) { return !!q.tracks; }
+
+  function sameTrack(a, b) { return a.artist === b.artist && a.title === b.title && a.album === b.album; }
+
+  function trackEntry(track, count) { return { track: track, count: count }; }
+
+  function collectionEntry(coll, count) {
+    return { kind: coll.kind, id: coll.id, name: coll.name, sub: coll.sub || "", cover: coll.cover || "",
+      tracks: coll.tracks, count: count };
+  }
+
+  /** Добавляет элемент; такой же трек / та же коллекция увеличивают счётчик, а не дублируются. */
+  function addToQueue(items, entry) {
+    for (var i = 0; i < items.length; i++) {
+      var q = items[i];
+      var same = isCollection(entry)
+        ? (isCollection(q) && q.kind === entry.kind && q.id === entry.id)
+        : (!isCollection(q) && q.track && sameTrack(q.track, entry.track));
+      if (same) { q.count += entry.count; return items; }
+    }
+    items.push(entry);
+    return items;
+  }
+
+  function collectionSeconds(coll) {
+    return coll.tracks.reduce(function (a, t) { return a + effDuration(t); }, 0);
+  }
+
+  function itemCount(q) { return q.count * itemTracks(q).length; }
+
+  function itemSeconds(q) {
+    return q.count * itemTracks(q).reduce(function (a, t) { return a + effDuration(t); }, 0);
+  }
+
   function totalCount(items) {
-    return items.reduce(function (a, q) { return a + q.count; }, 0);
+    return items.reduce(function (a, q) { return a + itemCount(q); }, 0);
   }
 
   function totalSeconds(items) {
-    return items.reduce(function (a, q) { return a + q.count * effDuration(q.track); }, 0);
+    return items.reduce(function (a, q) { return a + itemSeconds(q); }, 0);
+  }
+
+  /** Последний трек очереди (по порядку проигрывания) или null. */
+  function lastTrack(items) {
+    for (var i = items.length - 1; i >= 0; i--) {
+      var ts = itemTracks(items[i]);
+      if (ts.length && items[i].count > 0) return ts[ts.length - 1];
+    }
+    return null;
   }
 
   /** Раскладывает очередь в [{track, ts}]: прослушивания идут подряд,
@@ -97,9 +151,12 @@
     var ts = Math.floor(startMs / 1000);
     var plan = [];
     items.forEach(function (q) {
-      for (var i = 0; i < q.count; i++) {
-        plan.push({ track: q.track, ts: ts });
-        ts += effDuration(q.track);
+      var tracks = itemTracks(q);
+      for (var r = 0; r < q.count; r++) {
+        for (var i = 0; i < tracks.length; i++) {
+          plan.push({ track: tracks[i], ts: ts });
+          ts += effDuration(tracks[i]);
+        }
       }
     });
     return plan;
@@ -118,7 +175,7 @@
     if (startMs === null || startMs === undefined) return { level: "error", code: "bad_date", n: n };
     var secs = totalSeconds(items);
     var endMs = startMs + secs * 1000;
-    var lastStartMs = endMs - effDuration(items[items.length - 1].track) * 1000;
+    var lastStartMs = endMs - effDuration(lastTrack(items)) * 1000;
     var level = "ok", code = null;
     if (lastStartMs > nowMs) { level = "error"; code = "future"; }
     else if (nowMs - startMs > MAX_AGE_DAYS * 86400000) { level = "warn"; code = "old"; }
@@ -155,15 +212,72 @@
     };
   }
 
+  function midImage(images) {
+    images = images || [];
+    return images.length ? (images[Math.min(1, images.length - 1)].url || "") : "";
+  }
+
+  function parseSpotifyAlbum(a) {
+    var artists = a.artists || [];
+    return {
+      id: a.id || "",
+      kind: "album",
+      name: a.name || "",
+      sub: artists.length ? (artists[0].name || "") : "",
+      year: (a.release_date || "").slice(0, 4),
+      total: a.total_tracks || 0,
+      cover: midImage(a.images)
+    };
+  }
+
+  function parsePlaylist(p) {
+    var cnt = p.items && !Array.isArray(p.items) && typeof p.items === "object" ? p.items : p.tracks;
+    var owner = p.owner || {};
+    return {
+      id: p.id || "",
+      kind: "playlist",
+      name: p.name || "",
+      sub: owner.display_name || owner.id || "",
+      ownerId: owner.id || "",
+      collaborative: !!p.collaborative,
+      total: cnt && cnt.total ? cnt.total : 0,
+      cover: midImage(p.images)
+    };
+  }
+
+  /** Ссылка или URI Spotify -> {type: track|album|playlist|artist, id} либо null. */
+  function parseSpotifyLink(text) {
+    var s = (text || "").trim();
+    var m = /^spotify:(track|album|playlist|artist):([A-Za-z0-9]+)$/.exec(s);
+    if (!m) m = /^https?:\/\/open\.spotify\.com\/(?:intl-[a-z]+\/)?(?:embed\/)?(track|album|playlist|artist)\/([A-Za-z0-9]+)/.exec(s);
+    return m ? { type: m[1], id: m[2] } : null;
+  }
+
+  var RAND_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+
+  function randomString(n) {
+    var c = typeof globalThis !== "undefined" ? globalThis.crypto : null;
+    if (!c || !c.getRandomValues) throw new ApiError("В этой среде нет генератора случайных чисел.");
+    var bytes = new Uint8Array(n);
+    c.getRandomValues(bytes);
+    var out = "";
+    for (var i = 0; i < n; i++) out += RAND_CHARS.charAt(bytes[i] % RAND_CHARS.length);
+    return out;
+  }
+
+  var PLAYLIST_FORBIDDEN = "Spotify не отдаёт содержимое этого плейлиста: с февраля 2026 доступны только ваши собственные и совместные плейлисты.";
+  var RELOGIN = "Сессия Spotify истекла. Войдите заново на вкладке «Профиль».";
+
   /**
-   * env: { http(method, url, headers, body) -> Promise<{status, body, error?}>, md5(str) -> hex, sleep?(ms) }
-   * opts: { lastfmApi, spotifyTokenUrl, spotifySearchUrl } — для тестов.
+   * env: { http(method, url, headers, body) -> Promise<{status, body, error?}>, md5(str) -> hex,
+   *        sha256(str) -> base64url (для входа в Spotify), sleep?(ms) }
+   * opts: { lastfmApi, spotifyTokenUrl, spotifyApi } — для тестов.
    */
   function createApi(env, opts) {
     opts = opts || {};
     var lfmUrl = opts.lastfmApi || LASTFM_API;
     var spTokenUrl = opts.spotifyTokenUrl || SPOTIFY_TOKEN_URL;
-    var spSearchUrl = opts.spotifySearchUrl || SPOTIFY_SEARCH_URL;
+    var spBase = opts.spotifyApi || SPOTIFY_API;
     var sleep = env.sleep || function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
     var spotify = { token: null, expires: 0, id: null, secret: null };
 
@@ -302,8 +416,18 @@
 
     // --- Spotify ---
 
-    async function spotifyToken(cfg) {
-      if (spotify.token && spotify.id === cfg.id && spotify.secret === cfg.secret &&
+    function spError(r) {
+      if (r.status === 429) return new ApiError("Spotify: слишком много запросов, подождите минуту.", 429);
+      var err = r.data && r.data.error;
+      var msg = err && typeof err === "object" ? err.message : err;
+      return new ApiError("Spotify: HTTP " + r.status + (msg ? " — " + msg : ""), r.status);
+    }
+
+    var FORM = { "Content-Type": "application/x-www-form-urlencoded" };
+
+    /** Токен приложения (Client Credentials): поиск, альбомы, треки. */
+    async function spotifyToken(cfg, force) {
+      if (!force && spotify.token && spotify.id === cfg.id && spotify.secret === cfg.secret &&
           Date.now() < spotify.expires - 30000) {
         return spotify.token;
       }
@@ -325,21 +449,184 @@
       return spotify.token;
     }
 
+    /** Токен пользователя (вход через PKCE): плейлисты. user = {access, refresh, expires} — обновляется на месте. */
+    async function userToken(cfg, user, force) {
+      if (!user || !user.refresh) throw new ApiError("Войдите в Spotify на вкладке «Профиль».", "no_user");
+      if (!force && user.access && Date.now() < (user.expires || 0) - 30000) return user.access;
+      var body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: user.refresh, client_id: cfg.id }).toString();
+      var r = await fetchJson("POST", spTokenUrl, FORM, body);
+      if (r.status !== 200 || !r.data.access_token) throw new ApiError(RELOGIN, "relogin");
+      user.access = r.data.access_token;
+      user.expires = Date.now() + (parseInt(r.data.expires_in || 3600, 10) * 1000);
+      if (r.data.refresh_token) user.refresh = r.data.refresh_token;
+      return user.access;
+    }
+
+    function appAuth(cfg) { return function (force) { return spotifyToken(cfg, force); }; }
+    function userAuth(cfg, user) { return function (force) { return userToken(cfg, user, force); }; }
+
+    /** GET с токеном; при 401 один раз обновляет токен и повторяет. Возвращает {status, data}. */
+    async function spGet(auth, url) {
+      var token = await auth(false);
+      var r = await fetchJson("GET", url, { "Authorization": "Bearer " + token }, "");
+      if (r.status === 401) {
+        token = await auth(true);
+        r = await fetchJson("GET", url, { "Authorization": "Bearer " + token }, "");
+      }
+      return r;
+    }
+
+    /** Листает постраничный ответ ({items, next}) до конца или до max элементов. */
+    async function pageAll(auth, url, max) {
+      var out = [];
+      while (url && out.length < max) {
+        var r = await spGet(auth, url);
+        if (r.status !== 200) throw spError(r);
+        var block = r.data || {};
+        var items = block.items || [];
+        out = out.concat(items);
+        url = items.length ? block.next : null;
+      }
+      return out.slice(0, max);
+    }
+
+    // --- вход в Spotify (Authorization Code + PKCE, без секрета) ---
+
+    function newPkce() {
+      if (!env.sha256) throw new ApiError("SHA-256 недоступен в этой среде.");
+      var verifier = randomString(64);
+      return { verifier: verifier, state: randomString(24), challenge: env.sha256(verifier) };
+    }
+
+    function spotifyAuthUrl(cfg, state, challenge) {
+      return SPOTIFY_AUTH_URL + "?" + new URLSearchParams({
+        response_type: "code", client_id: cfg.id, redirect_uri: SPOTIFY_REDIRECT_URI,
+        code_challenge_method: "S256", code_challenge: challenge, state: state, scope: SPOTIFY_SCOPES
+      }).toString();
+    }
+
+    async function spotifyLogin(cfg, code, verifier) {
+      var body = new URLSearchParams({
+        grant_type: "authorization_code", code: code, redirect_uri: SPOTIFY_REDIRECT_URI,
+        client_id: cfg.id, code_verifier: verifier
+      }).toString();
+      var r = await fetchJson("POST", spTokenUrl, FORM, body);
+      if (r.status !== 200 || !r.data.access_token || !r.data.refresh_token) {
+        var desc = r.data.error_description || r.data.error || r.status;
+        throw new ApiError("Spotify: вход не удался (" + desc + ").");
+      }
+      return {
+        access: r.data.access_token,
+        refresh: r.data.refresh_token,
+        expires: Date.now() + (parseInt(r.data.expires_in || 3600, 10) * 1000)
+      };
+    }
+
+    // --- поиск ---
+
     /** mode: "track" — обычный поиск, "artist" — фильтр по исполнителю. -> {tracks, total} */
     async function searchTracks(cfg, query, mode, offset) {
-      var token = await spotifyToken(cfg);
       var q = mode === "artist" ? 'artist:"' + query + '"' : query;
       var qs = new URLSearchParams({ q: q, type: "track", limit: String(PAGE_SIZE), offset: String(offset || 0) });
-      var r = await fetchJson("GET", spSearchUrl + "?" + qs.toString(), { "Authorization": "Bearer " + token }, "");
-      if (r.status === 429) throw new ApiError("Spotify: слишком много запросов, подождите минуту.");
-      if (r.status !== 200) {
-        var err = r.data && r.data.error;
-        var msg = err && typeof err === "object" ? err.message : err;
-        throw new ApiError("Spotify: HTTP " + r.status + " — " + msg);
-      }
+      var r = await spGet(appAuth(cfg), spBase + "/search?" + qs.toString());
+      if (r.status !== 200) throw spError(r);
       var block = r.data.tracks || {};
       var tracks = (block.items || []).filter(Boolean).map(parseSpotifyTrack);
       return { tracks: tracks, total: parseInt(block.total || 0, 10) };
+    }
+
+    /** -> {albums: [{id, kind, name, sub, year, total, cover}], total} */
+    async function searchAlbums(cfg, query, offset) {
+      var qs = new URLSearchParams({ q: query, type: "album", limit: String(PAGE_SIZE), offset: String(offset || 0) });
+      var r = await spGet(appAuth(cfg), spBase + "/search?" + qs.toString());
+      if (r.status !== 200) throw spError(r);
+      var block = r.data.albums || {};
+      return {
+        albums: (block.items || []).filter(Boolean).map(parseSpotifyAlbum),
+        total: parseInt(block.total || 0, 10)
+      };
+    }
+
+    async function getTrack(cfg, id) {
+      var r = await spGet(appAuth(cfg), spBase + "/tracks/" + encodeURIComponent(id));
+      if (r.status === 404) throw new ApiError("Трек не найден в Spotify.", 404);
+      if (r.status !== 200) throw spError(r);
+      return parseSpotifyTrack(r.data);
+    }
+
+    // --- альбомы и плейлисты ---
+
+    /** Весь альбом: -> {kind: "album", id, name, sub, cover, tracks} */
+    async function getAlbum(cfg, id) {
+      var auth = appAuth(cfg);
+      var safe = encodeURIComponent(id);
+      var r = await spGet(auth, spBase + "/albums/" + safe);
+      if (r.status === 404) throw new ApiError("Альбом не найден в Spotify.", 404);
+      if (r.status !== 200) throw spError(r);
+      var info = parseSpotifyAlbum(r.data);
+      var raw = await pageAll(auth, spBase + "/albums/" + safe + "/tracks?limit=50&offset=0", MAX_COLLECTION_TRACKS);
+      var tracks = raw.filter(function (it) { return it && it.name; }).map(function (it) {
+        var artists = it.artists || [];
+        return {
+          artist: artists.length ? (artists[0].name || info.sub) : info.sub,
+          title: it.name,
+          album: info.name,
+          albumArtist: info.sub,
+          durationS: Math.round((it.duration_ms || 0) / 1000),
+          cover: ""
+        };
+      });
+      if (!tracks.length) throw new ApiError("В альбоме нет треков.");
+      return { kind: "album", id: info.id || id, name: info.name, sub: info.sub, cover: info.cover, tracks: tracks };
+    }
+
+    /** Плейлисты текущего пользователя, которые можно прочитать: свои и совместные.
+     *  -> {playlists, hidden} (hidden — сколько чужих скрыто). */
+    async function myPlaylists(cfg, user) {
+      var auth = userAuth(cfg, user);
+      var me = await spGet(auth, spBase + "/me");
+      if (me.status === 401) throw new ApiError(RELOGIN, "relogin");
+      var meId = me.status === 200 && me.data && me.data.id ? me.data.id : null;
+      var raw = await pageAll(auth, spBase + "/me/playlists?limit=50", 300);
+      var all = raw.filter(Boolean).map(parsePlaylist);
+      var list = meId ? all.filter(function (p) { return p.ownerId === meId || p.collaborative; }) : all;
+      return { playlists: list, hidden: all.length - list.length };
+    }
+
+    /** Весь плейлист: -> {kind: "playlist", id, name, sub, cover, tracks, skipped} */
+    async function getPlaylist(cfg, user, id) {
+      var auth = userAuth(cfg, user);
+      var safe = encodeURIComponent(id);
+      var r = await spGet(auth, spBase + "/playlists/" + safe);
+      if (r.status === 404) throw new ApiError("Плейлист не найден или недоступен вашему аккаунту.", 404);
+      if (r.status === 403) throw new ApiError(PLAYLIST_FORBIDDEN, 403);
+      if (r.status === 401) throw new ApiError(RELOGIN, "relogin");
+      if (r.status !== 200) throw spError(r);
+      var info = parsePlaylist(r.data);
+      var raw;
+      try {
+        // с 2026 года эндпоинт называется /items; старый /tracks оставлен запасным вариантом
+        try {
+          raw = await pageAll(auth, spBase + "/playlists/" + safe + "/items?limit=50&offset=0", MAX_COLLECTION_TRACKS);
+        } catch (e) {
+          if (e.code !== 404) throw e;
+          raw = await pageAll(auth, spBase + "/playlists/" + safe + "/tracks?limit=50&offset=0", MAX_COLLECTION_TRACKS);
+        }
+      } catch (e) {
+        if (e.code === 403) throw new ApiError(PLAYLIST_FORBIDDEN, 403);
+        throw e;
+      }
+      var tracks = [], skipped = 0;
+      raw.forEach(function (it) {
+        var t = it && (it.item || it.track);
+        if (!t || (t.type && t.type !== "track") || !t.name || !(t.artists && t.artists.length)) { skipped++; return; }
+        var tr = parseSpotifyTrack(t);
+        tr.cover = "";
+        tracks.push(tr);
+      });
+      if (!tracks.length) throw new ApiError("В плейлисте нет треков, которые можно заскробблить.");
+      return { kind: "playlist", id: info.id || id, name: info.name, sub: info.sub, cover: info.cover,
+        tracks: tracks, skipped: skipped };
     }
 
     return {
@@ -347,7 +634,15 @@
       authUrl: authUrl,
       getSession: getSession,
       sendScrobbles: sendScrobbles,
-      searchTracks: searchTracks
+      searchTracks: searchTracks,
+      searchAlbums: searchAlbums,
+      getTrack: getTrack,
+      getAlbum: getAlbum,
+      myPlaylists: myPlaylists,
+      getPlaylist: getPlaylist,
+      newPkce: newPkce,
+      spotifyAuthUrl: spotifyAuthUrl,
+      spotifyLogin: spotifyLogin
     };
   }
 
@@ -356,6 +651,9 @@
     createApi: createApi,
     lastfmSign: lastfmSign,
     parseSpotifyTrack: parseSpotifyTrack,
+    parseSpotifyAlbum: parseSpotifyAlbum,
+    parsePlaylist: parsePlaylist,
+    parseSpotifyLink: parseSpotifyLink,
     effDuration: effDuration,
     fmtDur: fmtDur,
     fmtTotal: fmtTotal,
@@ -363,6 +661,13 @@
     dateValue: dateValue,
     timeValue: timeValue,
     parseStart: parseStart,
+    itemTracks: itemTracks,
+    isCollection: isCollection,
+    trackEntry: trackEntry,
+    collectionEntry: collectionEntry,
+    collectionSeconds: collectionSeconds,
+    addToQueue: addToQueue,
+    lastTrack: lastTrack,
     totalCount: totalCount,
     totalSeconds: totalSeconds,
     buildPlan: buildPlan,
@@ -370,6 +675,7 @@
     checkPlan: checkPlan,
     BATCH_SIZE: BATCH_SIZE,
     PAGE_SIZE: PAGE_SIZE,
-    MAX_AGE_DAYS: MAX_AGE_DAYS
+    MAX_AGE_DAYS: MAX_AGE_DAYS,
+    SPOTIFY_REDIRECT_URI: SPOTIFY_REDIRECT_URI
   };
 });

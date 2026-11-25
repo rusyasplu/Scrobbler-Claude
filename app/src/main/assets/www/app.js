@@ -6,10 +6,22 @@
   var $ = function (s, r) { return (r || document).querySelector(s); };
 
   var ICON_NOTE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V6l10-2v12"/><circle cx="7" cy="18" r="2.5"/><circle cx="17" cy="16" r="2.5"/></svg>';
+  var ICON_DISC = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="2.6"/><path d="M12 3.5a8.5 8.5 0 0 1 6 2.5"/></svg>';
+  var ICON_LIST = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6.5h12M4 11.5h12M4 16.5h7"/><path d="M18 14.5v5l3.5-2.5z"/></svg>';
   var ICON_X = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M7 7l10 10M17 7L7 17"/></svg>';
   var ICON_PLUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 6v12M6 12h12"/></svg>';
   var ICON_MINUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 12h12"/></svg>';
   var TABS = ["search", "queue", "profile"];
+  var MODES = ["track", "artist", "album", "playlist"];
+  var PLACEHOLDER = {
+    track: "Название трека или ссылка Spotify",
+    artist: "Имя артиста",
+    album: "Название альбома или ссылка",
+    playlist: "Фильтр по названию или ссылка"
+  };
+  var KIND_LABEL = { album: "альбом", playlist: "плейлист" };
+  var MAX_TRACK_REPEATS = 5000;
+  var MAX_COLLECTION_REPEATS = 99;
 
   function esc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
@@ -23,6 +35,7 @@
     if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
     return many;
   }
+  function tracksWord(n) { return n + " " + plural(n, "трек", "трека", "треков"); }
   function fmtShort(ms) {
     var d = new Date(ms);
     return pad2(d.getDate()) + "." + pad2(d.getMonth() + 1) + " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes());
@@ -38,16 +51,23 @@
 
   var S = {
     tab: "search",
-    cfg: store.cfg || {},         // lfmKey, lfmSecret, spId, spSecret, sk, username, pendingToken
-    queue: store.queue || [],     // [{track, count}]
-    mode: "track", query: "", offset: 0, total: 0, results: [], searching: false,
-    addCount: 1,
+    // lfmKey, lfmSecret, spId, spSecret, sk, username, pendingToken,
+    // spUser {access, refresh, expires} — вход в Spotify, spPkce {verifier, state} — незавершённый вход
+    cfg: store.cfg || {},
+    queue: store.queue || [],     // [{track, count}] или [{kind, id, name, sub, cover, tracks, count}]
+    mode: "track", query: "", offset: 0, total: 0, results: [], searching: false, paged: false,
+    busyText: "", note: "",
+    myPl: null,                   // кеш списка плейлистов {playlists, hidden}
+    add: { track: 1, coll: 1 },   // сколько раз добавлять: трек / коллекцию целиком
     date: "", time: "",
     sending: false, stop: false
   };
 
+  // старый формат очереди (v1.0) совместим; битые элементы выбрасываем
+  S.queue = S.queue.filter(function (q) { return q && q.count > 0 && Core.itemTracks(q).length; });
+
   function persist() {
-    try { localStorage.setItem(LS_KEY, JSON.stringify({ cfg: S.cfg, queue: S.queue })); } catch (e) { /* ignore */ }
+    try { localStorage.setItem(LS_KEY, JSON.stringify({ cfg: S.cfg, queue: S.queue })); } catch (e) { /* нет места или хранилище недоступно */ }
   }
 
   // ---------- мост к Android ----------
@@ -81,6 +101,10 @@
     md5: function (s) {
       if (!hasNative) throw new Error("MD5 доступен только внутри приложения");
       return window.Native.md5(s);
+    },
+    sha256: function (s) {
+      if (!hasNative) throw new Error("SHA-256 доступен только внутри приложения");
+      return window.Native.sha256(s);
     }
   };
   var api = Core.createApi(env);
@@ -90,6 +114,10 @@
   }
   function keepAwake(on) {
     if (hasNative && window.Native.keepAwake) window.Native.keepAwake(on);
+  }
+  function copyText(t) {
+    if (hasNative && window.Native.copyText) { window.Native.copyText(t); return true; }
+    try { navigator.clipboard.writeText(t); return true; } catch (e) { return false; }
   }
 
   // ---------- уведомления и диалог ----------
@@ -136,92 +164,340 @@
     if (name === "queue") renderSummary();
   }
 
+  // ---------- Spotify: ключи и вход ----------
+
+  function spCfg() { return { id: (S.cfg.spId || "").trim(), secret: (S.cfg.spSecret || "").trim() }; }
+  function isSpLogged() { return !!(S.cfg.spUser && S.cfg.spUser.refresh); }
+  function isCollMode() { return S.mode === "album" || S.mode === "playlist"; }
+
+  /** Проверяет ключи; если их нет — подсказывает и переводит в профиль. */
+  function needSpotifyKeys(idOnly) {
+    var c = spCfg();
+    if (c.id && (idOnly || c.secret)) return c;
+    toast("Введите ключи Spotify на вкладке «Профиль»", "error");
+    setTab("profile");
+    return null;
+  }
+
+  function fail(e) {
+    if (e && e.code === "relogin") {
+      S.cfg.spUser = null;
+      S.myPl = null;
+      persist();
+      renderSpAuth();
+      renderResults();
+    }
+    toast((e && e.message) || String(e), "error");
+  }
+
+  function renderSpAuth() {
+    var logged = isSpLogged();
+    var st = $("#sp-auth-state");
+    st.className = "auth-state" + (logged ? " ok" : "");
+    st.innerHTML = '<i class="dot"></i><span>' + (logged ? "Вход в Spotify выполнен" : "Вход в Spotify не выполнен") + "</span>";
+    $("#btn-sp-login").textContent = logged ? "Войти заново" : "Войти в Spotify";
+    $("#btn-sp-logout").hidden = !logged;
+  }
+
+  function onSpLogin() {
+    var cfg = needSpotifyKeys(true);
+    if (!cfg) return;
+    if (!hasNative) { toast("Вход в Spotify работает только внутри приложения", "error"); return; }
+    try {
+      var pk = api.newPkce();
+      S.cfg.spPkce = { verifier: pk.verifier, state: pk.state };
+      persist();
+      openUrl(api.spotifyAuthUrl(cfg, pk.state, pk.challenge));
+      toast("Разрешите доступ на сайте Spotify, вы вернётесь в приложение сами");
+    } catch (e) {
+      toast(e.message, "error");
+    }
+  }
+
+  /** Приложение открыто по адресу scrobbler://callback?code=…&state=… */
+  async function handleSpotifyCallback(url) {
+    var qi = url.indexOf("?");
+    var params = new URLSearchParams(qi >= 0 ? url.slice(qi + 1).split("#")[0] : "");
+    var pk = S.cfg.spPkce;
+    S.cfg.spPkce = null;
+    persist();
+    if (!pk || params.get("state") !== pk.state) {
+      toast("Не удалось проверить ответ Spotify. Нажмите «Войти в Spotify» ещё раз.", "error");
+      return;
+    }
+    if (params.get("error")) { toast("Spotify: вход отменён (" + params.get("error") + ")", "error"); return; }
+    var code = params.get("code");
+    var cfg = spCfg();
+    if (!code || !cfg.id) { toast("Spotify не прислал код входа.", "error"); return; }
+    try {
+      S.cfg.spUser = await api.spotifyLogin(cfg, code, pk.verifier);
+      S.myPl = null;
+      persist();
+      renderSpAuth();
+      toast("Вход в Spotify выполнен");
+      if (S.mode === "playlist") showPlaylists(true); else renderResults();
+    } catch (e) {
+      toast(e.message, "error");
+    }
+  }
+
+  function pollCallback() {
+    if (!hasNative || !window.Native.takeCallback) return;
+    var u = window.Native.takeCallback();
+    if (u) handleSpotifyCallback(u);
+  }
+  window.__spotifyCallback = pollCallback;
+
   // ---------- поиск ----------
 
-  function coverHtml(t) {
+  function coverHtml(t, icon) {
     var url = t.cover && /^https:\/\//.test(t.cover) ? t.cover : "";
     return '<div class="cover">' + (url
       ? '<img src="' + esc(url) + '" alt="" loading="lazy" referrerpolicy="no-referrer">'
-      : ICON_NOTE) + '</div>';
+      : (icon || ICON_NOTE)) + '</div>';
+  }
+
+  function collSub(r) {
+    var n = r.tracks ? r.tracks.length : r.total;
+    var parts = [];
+    if (r.sub) parts.push(esc(r.sub));
+    if (n) parts.push(tracksWord(n));
+    if (r.year) parts.push(esc(r.year));
+    if (r.tracks) parts.push(Core.fmtTotal(Core.collectionSeconds(r)));
+    return parts.join(" · ");
+  }
+
+  function collRowHtml(r, i, buttons) {
+    return '<div class="row" style="--i:' + (i % 10) + '">' +
+      coverHtml(r, r.kind === "album" ? ICON_DISC : ICON_LIST) +
+      '<div class="meta"><div class="t wrap">' + esc(r.name) + "</div>" +
+      '<div class="s wrap"><span class="tag">' + KIND_LABEL[r.kind] + "</span>" + collSub(r) + "</div></div>" + buttons + "</div>";
+  }
+
+  function emptyHtml() {
+    var icon = S.mode === "album" ? ICON_DISC : (S.mode === "playlist" ? ICON_LIST : ICON_NOTE);
+    var text;
+    if (S.query) text = "Ничего не найдено";
+    else if (S.mode === "playlist") text = "Нет доступных плейлистов. Spotify отдаёт только ваши и совместные.";
+    else if (S.mode === "album") text = "Найдите альбом или вставьте ссылку на него";
+    else if (S.mode === "artist") text = "Введите имя артиста";
+    else text = "Найдите трек или артиста в каталоге Spotify";
+    return '<div class="empty">' + icon + "<div>" + text + "</div></div>";
   }
 
   function renderResults() {
     var box = $("#results");
+    var needLogin = S.mode === "playlist" && !isSpLogged();
+    $("#sp-login").hidden = !needLogin;
+    var note = $("#results-note");
+    note.hidden = !S.note;
+    note.textContent = S.note || "";
+    var more = $("#btn-more");
+
+    if (needLogin && !S.results.length) {
+      box.hidden = true;
+      more.hidden = true;
+      return;
+    }
+    box.hidden = false;
+
     if (S.searching && !S.results.length) {
-      box.innerHTML = '<div class="empty"><div class="spin"></div>Ищу в Spotify…</div>';
+      box.innerHTML = '<div class="empty"><div class="spin"></div>' + esc(S.busyText || "Ищу в Spotify…") + "</div>";
     } else if (!S.results.length) {
-      box.innerHTML = '<div class="empty">' + ICON_NOTE + '<div>' +
-        (S.query ? "Ничего не найдено" : "Найдите трек или артиста в каталоге Spotify") + '</div></div>';
+      box.innerHTML = emptyHtml();
     } else {
-      box.innerHTML = S.results.map(function (t, i) {
-        return '<div class="row" style="--i:' + (i % Core.PAGE_SIZE) + '">' + coverHtml(t) +
-          '<div class="meta"><div class="t">' + esc(t.title) + '</div>' +
-          '<div class="s">' + esc(t.artist) + (t.album ? " · " + esc(t.album) : "") + '</div></div>' +
-          '<div class="side"><span class="dur">' + Core.fmtDur(t.durationS) + '</span>' +
-          '<button class="rbtn" data-act="add" data-i="' + i + '" aria-label="Добавить">' + ICON_PLUS + '</button></div></div>';
+      box.innerHTML = S.results.map(function (r, i) {
+        var add = '<div class="side"><button class="rbtn" data-act="add" data-i="' + i + '" aria-label="Добавить">' + ICON_PLUS + "</button></div>";
+        if (r.kind) return collRowHtml(r, i, add);
+        return '<div class="row" style="--i:' + (i % Core.PAGE_SIZE) + '">' + coverHtml(r) +
+          '<div class="meta"><div class="t">' + esc(r.title) + "</div>" +
+          '<div class="s">' + esc(r.artist) + (r.album ? " · " + esc(r.album) : "") + "</div></div>" +
+          '<div class="side"><span class="dur">' + Core.fmtDur(r.durationS) + "</span>" +
+          '<button class="rbtn" data-act="add" data-i="' + i + '" aria-label="Добавить">' + ICON_PLUS + "</button></div></div>";
       }).join("");
     }
-    var more = $("#btn-more");
-    var canMore = S.results.length > 0 && S.offset < Math.min(S.total, 1000);
+    var canMore = S.paged && S.results.length > 0 && S.offset < Math.min(S.total, 1000);
     more.hidden = !canMore;
     more.disabled = S.searching;
   }
 
-  async function doSearch(more) {
-    if (S.searching) return;
-    var cfg = { id: (S.cfg.spId || "").trim(), secret: (S.cfg.spSecret || "").trim() };
-    if (!cfg.id || !cfg.secret) {
-      toast("Введите ключи Spotify на вкладке «Профиль»", "error");
-      setTab("profile");
+  function setMode(mode, silent) {
+    // в режиме «Плейлист» поле работает как фильтр по названию: текст прошлого поиска сюда не переносим
+    if (!silent && (mode === "playlist" || S.mode === "playlist")) $("#q").value = "";
+    S.mode = mode;
+    var i = MODES.indexOf(mode);
+    $("#seg").setAttribute("data-i", String(i));
+    document.querySelectorAll("#seg button").forEach(function (x) {
+      x.classList.toggle("on", x.getAttribute("data-mode") === mode);
+    });
+    $("#q").placeholder = PLACEHOLDER[mode];
+    $("#add-label").textContent = isCollMode() ? "Сколько раз целиком" : "Скробблов на трек";
+    $("#add-count").textContent = isCollMode() ? S.add.coll : S.add.track;
+    S.results = []; S.query = ""; S.offset = 0; S.total = 0; S.paged = false; S.note = "";
+    if (silent) { renderResults(); return; }
+    if (mode === "playlist") showPlaylists(false);
+    else if ($("#q").value.trim()) doSearch(false);
+    else renderResults();
+  }
+
+  /** Список своих плейлистов (нужен вход в Spotify); текст в поле — фильтр по названию. */
+  async function showPlaylists(force) {
+    S.paged = false;
+    if (!isSpLogged()) { S.results = []; S.note = ""; renderResults(); return; }
+    var cfg = needSpotifyKeys(true);
+    if (!cfg) return;
+    if (!S.myPl || force) {
+      if (S.searching) return;
+      S.searching = true; S.busyText = "Загружаю плейлисты…"; S.results = []; renderResults();
+      try {
+        S.myPl = await api.myPlaylists(cfg, S.cfg.spUser);
+      } catch (e) {
+        fail(e);
+      } finally {
+        S.searching = false;
+        persist();
+      }
+    }
+    if (S.mode !== "playlist") return;
+    var f = $("#q").value.trim().toLowerCase();
+    S.query = f;
+    S.results = S.myPl ? S.myPl.playlists.filter(function (p) { return !f || p.name.toLowerCase().indexOf(f) >= 0; }) : [];
+    S.note = S.myPl && S.myPl.hidden
+      ? "Скрыто чужих плейлистов: " + S.myPl.hidden + ". Spotify отдаёт только ваши и совместные."
+      : "";
+    renderResults();
+  }
+
+  /** Вставлена ссылка Spotify: открываем трек / альбом / плейлист напрямую. */
+  async function openLink(link) {
+    if (link.type === "artist") {
+      toast("Ссылки на артистов не поддерживаются: введите имя на вкладке «Артист»", "error");
       return;
     }
+    setMode(link.type, true);
+    var cfg;
+    if (link.type === "playlist") {
+      if (!isSpLogged()) { renderResults(); return; }
+      cfg = needSpotifyKeys(true);
+    } else {
+      cfg = needSpotifyKeys(false);
+    }
+    if (!cfg) return;
+    S.searching = true; S.busyText = "Загружаю по ссылке…"; S.query = link.id; renderResults();
+    try {
+      if (link.type === "track") {
+        S.results = [await api.getTrack(cfg, link.id)];
+      } else if (link.type === "album") {
+        S.results = [await api.getAlbum(cfg, link.id)];
+      } else {
+        var p = await api.getPlaylist(cfg, S.cfg.spUser, link.id);
+        S.results = [p];
+        if (p.skipped) S.note = "Пропущено позиций, которые нельзя заскробблить (подкасты, недоступные треки): " + p.skipped + ".";
+      }
+    } catch (e) {
+      fail(e);
+    } finally {
+      S.searching = false;
+      persist();
+      renderResults();
+    }
+  }
+
+  async function doSearch(more) {
+    if (S.searching) return;
     if (!more) {
       var q = $("#q").value.trim();
+      var link = Core.parseSpotifyLink(q);
+      if (link) { document.activeElement && document.activeElement.blur(); return openLink(link); }
+      if (S.mode === "playlist") { document.activeElement && document.activeElement.blur(); return showPlaylists(false); }
       if (!q) return;
-      S.query = q; S.offset = 0; S.total = 0; S.results = [];
+      var cfg0 = needSpotifyKeys(false);
+      if (!cfg0) return;
+      S.query = q; S.offset = 0; S.total = 0; S.results = []; S.note = ""; S.paged = true;
       document.activeElement && document.activeElement.blur();
     }
-    S.searching = true;
+    var cfg = needSpotifyKeys(false);
+    if (!cfg) return;
+    S.searching = true; S.busyText = "Ищу в Spotify…";
     renderResults();
     try {
-      var r = await api.searchTracks(cfg, S.query, S.mode, S.offset);
-      S.results = S.results.concat(r.tracks);
+      if (S.mode === "album") {
+        var ra = await api.searchAlbums(cfg, S.query, S.offset);
+        S.results = S.results.concat(ra.albums);
+        S.total = ra.total;
+      } else {
+        var r = await api.searchTracks(cfg, S.query, S.mode, S.offset);
+        S.results = S.results.concat(r.tracks);
+        S.total = r.total;
+      }
       S.offset += Core.PAGE_SIZE;
-      S.total = r.total;
     } catch (e) {
-      toast(e.message, "error");
+      fail(e);
     } finally {
       S.searching = false;
       renderResults();
     }
   }
 
-  // ---------- очередь ----------
+  // ---------- добавление в очередь ----------
 
-  function addToQueue(track, cnt) {
-    for (var i = 0; i < S.queue.length; i++) {
-      var q = S.queue[i].track;
-      if (q.artist === track.artist && q.title === track.title && q.album === track.album) {
-        S.queue[i].count += cnt;
+  function addTrack(t) {
+    Core.addToQueue(S.queue, Core.trackEntry(t, S.add.track));
+    persist();
+    renderQueue();
+    toast("Добавлено: " + t.title + " ×" + S.add.track);
+  }
+
+  async function addCollection(r, btn) {
+    var coll = r.tracks ? r : null;
+    if (!coll) {
+      var cfg = r.kind === "playlist" ? needSpotifyKeys(true) : needSpotifyKeys(false);
+      if (!cfg) return;
+      btn.classList.add("busy");
+      try {
+        coll = r.kind === "album"
+          ? await api.getAlbum(cfg, r.id)
+          : await api.getPlaylist(cfg, S.cfg.spUser, r.id);
+        r.tracks = coll.tracks;          // запоминаем, чтобы второй раз не качать
+        r.skipped = coll.skipped;
+        persist();
+        renderResults();
+      } catch (e) {
+        btn.classList.remove("busy");
+        fail(e);
         return;
       }
     }
-    S.queue.push({ track: track, count: cnt });
+    Core.addToQueue(S.queue, Core.collectionEntry({
+      kind: r.kind, id: r.id, name: r.name, sub: r.sub, cover: r.cover, tracks: coll.tracks
+    }, S.add.coll));
+    persist();
+    renderQueue();
+    var msg = "Добавлено: " + r.name + " (" + tracksWord(coll.tracks.length) + ") ×" + S.add.coll;
+    if (r.skipped) msg += ". Пропущено позиций: " + r.skipped;
+    toast(msg);
   }
+
+  // ---------- очередь ----------
 
   function renderQueue() {
     var box = $("#queue");
     box.hidden = !S.queue.length;
     box.innerHTML = S.queue.map(function (q, i) {
+      var ctl = '<div class="side"><div class="qctl">' +
+        '<button class="rbtn" data-act="dec" data-i="' + i + '" aria-label="Меньше">' + ICON_MINUS + "</button>" +
+        '<span class="qcount">' + q.count + "</span>" +
+        '<button class="rbtn" data-act="inc" data-i="' + i + '" aria-label="Больше">' + ICON_PLUS + "</button></div>" +
+        '<button class="rbtn" data-act="del" data-i="' + i + '" aria-label="Удалить">' + ICON_X + "</button></div>";
+      if (Core.isCollection(q)) {
+        return collRowHtml({
+          kind: q.kind, name: q.name, sub: q.sub, cover: q.cover, tracks: q.tracks
+        }, i, ctl);
+      }
       var t = q.track;
-      return '<div class="row" style="--i:' + i + '">' + coverHtml(t) +
-        '<div class="meta"><div class="t">' + esc(t.title) + '</div>' +
-        '<div class="s">' + esc(t.artist) + ' · ' + Core.fmtDur(t.durationS) + '</div></div>' +
-        '<div class="side"><div class="qctl">' +
-        '<button class="rbtn" data-act="dec" data-i="' + i + '" aria-label="Меньше">' + ICON_MINUS + '</button>' +
-        '<span class="qcount">' + q.count + '</span>' +
-        '<button class="rbtn" data-act="inc" data-i="' + i + '" aria-label="Больше">' + ICON_PLUS + '</button></div>' +
-        '<button class="rbtn" data-act="del" data-i="' + i + '" aria-label="Удалить">' + ICON_X + '</button></div></div>';
+      return '<div class="row" style="--i:' + (i % 10) + '">' + coverHtml(t) +
+        '<div class="meta"><div class="t">' + esc(t.title) + "</div>" +
+        '<div class="s">' + esc(t.artist) + " · " + Core.fmtDur(t.durationS) + "</div></div>" + ctl + "</div>";
     }).join("");
     var n = Core.totalCount(S.queue);
     var badge = $("#badge");
@@ -237,7 +513,7 @@
     var cls = chk.level === "ok" ? "" : chk.level;
     el.className = "card glass sum " + cls;
     if (chk.level === "empty") {
-      el.innerHTML = '<div class="big">Очередь пуста</div><div class="line">Добавьте треки на вкладке «Поиск»</div>';
+      el.innerHTML = '<div class="big">Очередь пуста</div><div class="line">Добавьте треки, альбомы или плейлисты на вкладке «Поиск»</div>';
       return;
     }
     var head = '<div class="big">' + chk.n + " " + plural(chk.n, "скроббл", "скроббла", "скробблов") + "</div>";
@@ -385,29 +661,39 @@
     // поиск
     $("#btn-search").addEventListener("click", function () { doSearch(false); });
     $("#q").addEventListener("keydown", function (e) { if (e.key === "Enter") doSearch(false); });
+    $("#q").addEventListener("input", function () {
+      // в режиме «Плейлист» текст сразу фильтрует загруженный список
+      if (S.mode === "playlist" && S.myPl && !S.searching && !Core.parseSpotifyLink($("#q").value)) showPlaylists(false);
+    });
     $("#btn-more").addEventListener("click", function () { doSearch(true); });
     $("#seg").addEventListener("click", function (e) {
       var b = e.target.closest("button[data-mode]");
-      if (!b) return;
-      S.mode = b.getAttribute("data-mode");
-      $("#seg").setAttribute("data-i", S.mode === "artist" ? "1" : "0");
-      document.querySelectorAll("#seg button").forEach(function (x) { x.classList.toggle("on", x === b); });
-      if ($("#q").value.trim()) doSearch(false);
+      if (!b || b.getAttribute("data-mode") === S.mode) return;
+      setMode(b.getAttribute("data-mode"), false);
     });
-    function setAdd(n) { S.addCount = Math.max(1, Math.min(5000, n)); $("#add-count").textContent = S.addCount; }
-    $("#add-dec").addEventListener("click", function () { setAdd(S.addCount - (S.addCount > 10 ? 5 : 1)); });
-    $("#add-inc").addEventListener("click", function () { setAdd(S.addCount + (S.addCount >= 10 ? 5 : 1)); });
+    function setAdd(n) {
+      var key = isCollMode() ? "coll" : "track";
+      var max = isCollMode() ? MAX_COLLECTION_REPEATS : MAX_TRACK_REPEATS;
+      S.add[key] = Math.max(1, Math.min(max, n));
+      $("#add-count").textContent = S.add[key];
+    }
+    function curAdd() { return isCollMode() ? S.add.coll : S.add.track; }
+    $("#add-dec").addEventListener("click", function () {
+      var n = curAdd();
+      setAdd(n - (!isCollMode() && n > 10 ? 5 : 1));
+    });
+    $("#add-inc").addEventListener("click", function () {
+      var n = curAdd();
+      setAdd(n + (!isCollMode() && n >= 10 ? 5 : 1));
+    });
 
     $("#results").addEventListener("click", function (e) {
       var b = e.target.closest("[data-act=add]");
       if (!b) return;
-      var t = S.results[+b.getAttribute("data-i")];
-      if (!t) return;
-      addToQueue(t, S.addCount);
-      persist();
-      renderQueue();
+      var r = S.results[+b.getAttribute("data-i")];
+      if (!r) return;
       b.classList.remove("pop"); void b.offsetWidth; b.classList.add("pop");
-      toast("Добавлено: " + t.title + " ×" + S.addCount);
+      if (r.kind) addCollection(r, b); else addTrack(r);
     });
 
     // очередь
@@ -416,7 +702,8 @@
       if (!b) return;
       var i = +b.getAttribute("data-i"), act = b.getAttribute("data-act"), q = S.queue[i];
       if (!q) return;
-      if (act === "inc") q.count = Math.min(5000, q.count + 1);
+      var max = Core.isCollection(q) ? MAX_COLLECTION_REPEATS : MAX_TRACK_REPEATS;
+      if (act === "inc") q.count = Math.min(max, q.count + 1);
       if (act === "dec") q.count = Math.max(1, q.count - 1);
       if (act === "del") S.queue.splice(i, 1);
       persist();
@@ -455,9 +742,26 @@
       S.cfg.sk = null; S.cfg.username = null; S.cfg.pendingToken = null;
       persist(); renderAuth(); toast("Вы вышли из аккаунта");
     });
+    $("#btn-sp-login").addEventListener("click", onSpLogin);
+    $("#btn-sp-login-search").addEventListener("click", onSpLogin);
+    $("#btn-sp-logout").addEventListener("click", function () {
+      S.cfg.spUser = null; S.cfg.spPkce = null; S.myPl = null;
+      persist(); renderSpAuth();
+      if (S.mode === "playlist") { S.results = []; S.note = ""; }
+      renderResults();
+      toast("Вы вышли из Spotify");
+    });
+    $("#btn-copy-redirect").addEventListener("click", function () {
+      var copied = copyText(Core.SPOTIFY_REDIRECT_URI);
+      toast(copied ? "Адрес скопирован" : "Не удалось скопировать, перепишите вручную", copied ? undefined : "error");
+    });
+    $("#redirect-uri").textContent = Core.SPOTIFY_REDIRECT_URI;
     document.querySelectorAll("a[data-open]").forEach(function (a) {
       a.addEventListener("click", function (e) { e.preventDefault(); openUrl(a.href); });
     });
+
+    // возвращение из браузера после входа в Spotify
+    document.addEventListener("visibilitychange", function () { if (!document.hidden) pollCallback(); });
 
     // прячем плавающую панель, пока открыта клавиатура
     document.addEventListener("focusin", function (e) {
@@ -467,7 +771,9 @@
   }
 
   bind();
-  renderResults();
+  setMode("track", true);
   renderQueue();
   renderAuth();
+  renderSpAuth();
+  pollCallback();
 })();
