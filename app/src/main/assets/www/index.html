@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#070816">
+<title>Scrobbler</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="bg" aria-hidden="true">
+  <i class="blob b1"></i><i class="blob b2"></i><i class="blob b3"></i><i class="blob b4"></i>
+</div>
+
+<div id="toast" class="toast glass" role="status" aria-live="polite"></div>
+
+<div id="modal" class="modal" aria-hidden="true">
+  <div class="box glass">
+    <h3 id="modal-title"></h3>
+    <p id="modal-text"></p>
+    <div class="acts">
+      <button id="modal-cancel" class="btn">Отмена</button>
+      <button id="modal-ok" class="btn primary">Отправить</button>
+    </div>
+  </div>
+</div>
+
+<main>
+
+  <!-- ПОИСК -->
+  <section id="tab-search" class="tab active">
+    <header class="head">
+      <h1>Поиск</h1>
+      <p>Каталог Spotify → очередь → Last.fm</p>
+    </header>
+
+    <div class="field">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+      <input id="q" type="search" placeholder="Трек или артист" enterkeyhint="search" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button id="btn-search" class="btn primary sm">Найти</button>
+    </div>
+
+    <div id="seg" class="seg" data-i="0">
+      <i class="thumb"></i>
+      <button data-mode="track" class="on">Трек</button>
+      <button data-mode="artist">Артист</button>
+    </div>
+
+    <div class="card glass row-card">
+      <span>Скробблов на трек</span>
+      <div class="stepper">
+        <button id="add-dec" class="rbtn" aria-label="Меньше"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 12h12"/></svg></button>
+        <b id="add-count">1</b>
+        <button id="add-inc" class="rbtn" aria-label="Больше"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 6v12M6 12h12"/></svg></button>
+      </div>
+    </div>
+
+    <div id="results" class="list glass"></div>
+    <button id="btn-more" class="btn wide" hidden>Ещё 10</button>
+  </section>
+
+  <!-- ОЧЕРЕДЬ -->
+  <section id="tab-queue" class="tab">
+    <header class="head">
+      <h1>Очередь</h1>
+      <p>Что и когда попадёт в профиль</p>
+    </header>
+
+    <div id="summary" class="card glass sum empty"></div>
+
+    <div id="queue" class="list glass" hidden></div>
+
+    <div class="card glass">
+      <h3>Начало (местное время)</h3>
+      <div class="dt">
+        <div><label for="in-date">Дата</label><input id="in-date" type="date"></div>
+        <div><label for="in-time">Время</label><input id="in-time" type="time"></div>
+      </div>
+      <div class="chips">
+        <button id="chip-now" class="btn sm">Сейчас</button>
+        <button id="chip-end" class="btn sm">Закончить сейчас</button>
+      </div>
+    </div>
+
+    <div class="card glass">
+      <h3>Отправка</h3>
+      <label class="switch">
+        <span>Пробный запуск<small>ничего не отправлять, только показать план</small></span>
+        <input id="dry" type="checkbox"><span class="track"></span>
+      </label>
+      <button id="btn-send" class="btn primary wide big">Отправить в Last.fm</button>
+      <button id="btn-stop" class="btn danger wide" hidden>Остановить</button>
+      <div class="bar" id="bar-wrap" hidden><i id="bar"></i></div>
+      <div id="log" class="log" hidden></div>
+    </div>
+  </section>
+
+  <!-- ПРОФИЛЬ -->
+  <section id="tab-profile" class="tab">
+    <header class="head">
+      <h1>Профиль</h1>
+      <p>Ключи хранятся только на этом телефоне</p>
+    </header>
+
+    <div class="card glass">
+      <h3>Last.fm</h3>
+      <label class="lbl" for="in-lfm-key">API key</label>
+      <div class="field slim"><input id="in-lfm-key" type="text" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+      <label class="lbl" for="in-lfm-secret">Shared secret</label>
+      <div class="field slim"><input id="in-lfm-secret" type="password" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+      <div id="auth-state" class="auth-state"></div>
+      <button id="btn-login" class="btn primary wide">Войти в Last.fm</button>
+      <button id="btn-logout" class="btn wide" hidden>Выйти из аккаунта</button>
+      <p class="hint">Пароль приложение не видит: вход идёт через страницу разрешения на сайте Last.fm.
+        <a href="https://www.last.fm/api/account/create" data-open>Получить ключи</a></p>
+    </div>
+
+    <div class="card glass">
+      <h3>Spotify</h3>
+      <label class="lbl" for="in-sp-id">Client ID</label>
+      <div class="field slim"><input id="in-sp-id" type="text" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+      <label class="lbl" for="in-sp-secret">Client Secret</label>
+      <div class="field slim"><input id="in-sp-secret" type="password" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+      <p class="hint">Нужен только для поиска по каталогу. С февраля 2026 владелец приложения Spotify в Development Mode должен иметь Premium.
+        <a href="https://developer.spotify.com/dashboard" data-open>Получить ключи</a></p>
+    </div>
+
+    <p class="foot">Last.fm может счесть искусственные скробблы нарушением правил сервиса, поэтому для основного аккаунта это риск.</p>
+  </section>
+
+</main>
+
+<nav id="tabbar" class="tabbar glass" data-i="0">
+  <i class="lens"></i>
+  <button data-tab="search" class="on">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+    <span>Поиск</span>
+  </button>
+  <button data-tab="queue">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6.5h16M4 12h16M4 17.5h9"/><path d="M17.5 15.5v4l3-2z"/></svg>
+    <span>Очередь</span>
+    <em id="badge" class="badge" hidden>0</em>
+  </button>
+  <button data-tab="profile">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8.5" r="3.6"/><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"/></svg>
+    <span>Профиль</span>
+  </button>
+</nav>
+
+<script src="core.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

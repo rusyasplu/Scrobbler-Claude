@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- «Стеклянный» диск с нотой в безопасной зоне адаптивной иконки -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#33FFFFFF"
+        android:strokeColor="#99FFFFFF"
+        android:strokeWidth="1.5"
+        android:pathData="M54,54m-28,0a28,28 0 1,1 56,0a28,28 0 1,1 -56,0" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M42,64a6,5 0 1,0 12,0a6,5 0 1,0 -12,0z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M53,64L53,40L56.5,40L56.5,64z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M56.5,40C57,46 64,46 65,53C62,50 59,49.5 56.5,49.5z" />
+</vector>
