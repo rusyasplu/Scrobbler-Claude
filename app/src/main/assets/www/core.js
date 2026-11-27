@@ -281,13 +281,15 @@
   /**
    * env: { http(method, url, headers, body) -> Promise<{status, body, error?}>, md5(str) -> hex,
    *        sha256(str) -> base64url (для входа в Spotify), sleep?(ms) }
-   * opts: { lastfmApi, spotifyTokenUrl, spotifyApi } — для тестов.
+   * opts: { lastfmApi, spotifyTokenUrl, spotifyApi } — для тестов; redirectUri — адрес возврата при входе в Spotify
+   *       (по умолчанию scrobbler://callback для приложения, у сайта — его собственный адрес).
    */
   function createApi(env, opts) {
     opts = opts || {};
     var lfmUrl = opts.lastfmApi || LASTFM_API;
     var spTokenUrl = opts.spotifyTokenUrl || SPOTIFY_TOKEN_URL;
     var spBase = opts.spotifyApi || SPOTIFY_API;
+    var redirectUri = opts.redirectUri || SPOTIFY_REDIRECT_URI;   // у сайта свой адрес возврата
     var sleep = env.sleep || function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
     var spotify = { token: null, expires: 0, id: null, secret: null };
 
@@ -520,14 +522,14 @@
 
     function spotifyAuthUrl(cfg, state, challenge) {
       return SPOTIFY_AUTH_URL + "?" + new URLSearchParams({
-        response_type: "code", client_id: cfg.id, redirect_uri: SPOTIFY_REDIRECT_URI,
+        response_type: "code", client_id: cfg.id, redirect_uri: redirectUri,
         code_challenge_method: "S256", code_challenge: challenge, state: state, scope: SPOTIFY_SCOPES
       }).toString();
     }
 
     async function spotifyLogin(cfg, code, verifier) {
       var body = new URLSearchParams({
-        grant_type: "authorization_code", code: code, redirect_uri: SPOTIFY_REDIRECT_URI,
+        grant_type: "authorization_code", code: code, redirect_uri: redirectUri,
         client_id: cfg.id, code_verifier: verifier
       }).toString();
       var r = await fetchJson("POST", spTokenUrl, FORM, body);
@@ -662,7 +664,8 @@
       getPlaylist: getPlaylist,
       newPkce: newPkce,
       spotifyAuthUrl: spotifyAuthUrl,
-      spotifyLogin: spotifyLogin
+      spotifyLogin: spotifyLogin,
+      redirectUri: redirectUri
     };
   }
 

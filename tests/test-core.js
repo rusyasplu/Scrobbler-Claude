@@ -190,6 +190,28 @@ const test = (name, fn) => tests.push([name, fn]);
 const CFG = { id: "id", secret: "sec" };
 let user = null;   // сессия пользователя Spotify, общая для тестов входа и плейлистов
 
+// ---------- сайт: копия ядра и свои хеши ----------
+
+test("сайт: docs/core.js совпадает с ядром приложения, хеши совпадают с Node crypto", () => {
+  const fs = require("node:fs");
+  const app = fs.readFileSync(path.join(__dirname, "..", "app", "src", "main", "assets", "www", "core.js"), "utf8");
+  const site = fs.readFileSync(path.join(__dirname, "..", "docs", "core.js"), "utf8");
+  assert.equal(site, app, "после правки core.js скопируйте его в docs/core.js");
+  const H = require(path.join(__dirname, "..", "docs", "hash.js"));
+  for (const s of ["", "abc", "Привет ♪ 🎵", "x".repeat(55), "x".repeat(56), "x".repeat(64), "y".repeat(1000)]) {
+    assert.equal(H.md5(s), md5(s));
+    assert.equal(H.sha256(s), sha256(s));
+  }
+});
+
+test("свой адрес возврата Spotify (сайт) попадает в ссылку входа", () => {
+  const web = Core.createApi({ http: async () => ({ status: 0 }), md5, sha256 }, { redirectUri: "https://u.github.io/Scrobbler-Claude/" });
+  assert.equal(web.redirectUri, "https://u.github.io/Scrobbler-Claude/");
+  const u = new URL(web.spotifyAuthUrl(CFG, "st", "ch"));
+  assert.equal(u.searchParams.get("redirect_uri"), "https://u.github.io/Scrobbler-Claude/");
+  assert.equal(Core.createApi({ http: async () => ({ status: 0 }), md5, sha256 }, {}).redirectUri, "scrobbler://callback");
+});
+
 // ---------- время, план, подпись ----------
 
 test("подпись: порядок параметров, массивы, юникод", () => {

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scrobbler</title>
+<style>
+  body { max-width: 780px; margin: 1em auto; padding: 0 1em; font: 16px/1.4 system-ui, sans-serif; }
+  fieldset { margin: 1em 0; }
+  input[type=text], input[type=password], input[type=search] { width: 100%; max-width: 28em; box-sizing: border-box; }
+  #msg { min-height: 1.4em; font-weight: bold; }
+  #msg.err { color: #b00020; }
+  li { margin: .35em 0; }
+  pre { white-space: pre-wrap; max-height: 16em; overflow: auto; border: 1px solid #888; padding: .5em; }
+  .dim { color: #666; font-size: .9em; }
+</style>
+</head>
+<body>
+<h1>Scrobbler для Last.fm</h1>
+<p class="dim">Добавляет скробблы в профиль Last.fm: треки, альбомы и плейлисты из каталога Spotify, с выбором даты и времени.
+  Версия сайта 1.1.1. Ключи хранятся только в этом браузере.</p>
+<p id="msg" role="status"></p>
+
+<fieldset>
+  <legend>Настройки</legend>
+  <p><b>Last.fm</b> (ключи: <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">last.fm/api/account/create</a>)<br>
+    <label>API key<br><input id="in-lfm-key" type="text" autocomplete="off"></label><br>
+    <label>Shared secret<br><input id="in-lfm-secret" type="password" autocomplete="off"></label><br>
+    <button id="btn-login">Войти в Last.fm</button>
+    <button id="btn-logout" hidden>Выйти</button>
+    <span id="auth-state"></span></p>
+  <p><b>Spotify</b> (ключи: <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">developer.spotify.com/dashboard</a>)<br>
+    <label>Client ID<br><input id="in-sp-id" type="text" autocomplete="off"></label><br>
+    <label>Client secret<br><input id="in-sp-secret" type="password" autocomplete="off"></label></p>
+  <p><b>Вход в Spotify для плейлистов</b> (альбомы и треки работают без него).
+    Spotify отдаёт только ваши и совместные плейлисты. Один раз добавьте этот адрес в Redirect URIs вашего приложения на сайте Spotify:<br>
+    <code id="redirect-uri"></code> <button id="btn-copy-redirect">Копировать</button><br>
+    <button id="btn-sp-login">Войти в Spotify</button>
+    <button id="btn-sp-logout" hidden>Выйти из Spotify</button>
+    <span id="sp-auth-state"></span></p>
+</fieldset>
+
+<fieldset>
+  <legend>Поиск</legend>
+  <p>
+    <select id="mode" aria-label="Что искать">
+      <option value="track">Трек</option>
+      <option value="artist">Артист</option>
+      <option value="album">Альбом</option>
+      <option value="playlist">Плейлист</option>
+    </select>
+    <input id="q" type="search" placeholder="Название или ссылка Spotify" autocomplete="off">
+    <button id="btn-search">Найти</button>
+  </p>
+  <p><label><span id="add-label">Скробблов на трек</span>: <input id="add-count" type="number" min="1" value="1" style="width:5em"></label></p>
+  <p id="results-note" class="dim" hidden></p>
+  <ul id="results"></ul>
+  <button id="btn-more" hidden>Ещё 10</button>
+</fieldset>
+
+<fieldset>
+  <legend>Очередь</legend>
+  <ul id="queue"></ul>
+  <p id="summary"></p>
+  <p>
+    <label>Дата начала <input id="in-date" type="date"></label>
+    <label>Время <input id="in-time" type="time"></label>
+    <button id="chip-now">Сейчас</button>
+    <button id="chip-end">Закончить сейчас</button>
+  </p>
+  <p><label><input id="dry" type="checkbox"> Пробный запуск (ничего не отправлять)</label></p>
+  <p><button id="btn-send">Отправить в Last.fm</button> <button id="btn-stop" hidden>Остановить</button></p>
+  <progress id="bar" max="100" value="0" hidden></progress>
+  <pre id="log" hidden></pre>
+</fieldset>
+
+<p class="dim">Last.fm может счесть искусственные скробблы нарушением правил сервиса, поэтому для основного аккаунта это риск.
+  Скробблы старше ~2 недель и из будущего Last.fm отклоняет.</p>
+
+<script src="core.js"></script>
+<script src="hash.js"></script>
+<script src="site.js"></script>
+</body>
+</html>
