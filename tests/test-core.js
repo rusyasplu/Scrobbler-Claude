@@ -105,6 +105,9 @@ const server = http.createServer((req, res) => {
         }
         return send(200, { tracks: { total: 42, items: [SONG, null] } });
       }
+      if (p === "/v1/tracks/QUOTA") return send(429, { error: { status: 429, message: "Too many requests", reason: "QUOTA_EXCEEDED" } });
+      if (p === "/v1/tracks/RATE") return send(429, { error: { status: 429, message: "API rate limit exceeded" } });
+      if (p === "/v1/tracks/NOPREMIUM") return send(403, { error: { status: 403, message: "Active premium subscription required for the owner of the app" } });
       if (p === "/v1/tracks/T1") return send(200, SONG);
       if (p.startsWith("/v1/tracks/")) return send(404, { error: { status: 404, message: "Non existing id" } });
 
@@ -309,6 +312,17 @@ test("Spotify: поиск альбомов и трек по ссылке", async
   const t = await env.api.getTrack(CFG, "T1");
   assert.equal(t.title, "Song");
   await assert.rejects(env.api.getTrack(CFG, "NOPE"), (e) => e.code === 404);
+});
+
+test("Spotify: понятные сообщения об исчерпанной квоте, лимите частоты и 403", async (env) => {
+  await assert.rejects(env.api.getTrack(CFG, "QUOTA"), (e) => e.code === 429 && /исчерпана квота Development Mode/.test(e.message));
+  await assert.rejects(env.api.getTrack(CFG, "RATE"), (e) => e.code === 429 && /слишком много запросов/.test(e.message));
+  await assert.rejects(env.api.getTrack(CFG, "NOPREMIUM"), (e) => e.code === 403 && /Premium/.test(e.message) && /premium subscription required/.test(e.message));
+});
+
+test("Last.fm: к коду ошибки добавляется подсказка", async (env) => {
+  await assert.rejects(env.api.sendScrobbles(Core.buildPlan([{ track: { artist: "A", title: "T", album: "", albumArtist: "A", durationS: 200 }, count: 1 }], Date.now() - 3600000),
+    { key: "KEY", secret: SECRET, sk: "BAD" }, { pause: 0 }), (e) => e.code === 9 && /войдите в Last\.fm заново/.test(e.message));
 });
 
 test("Spotify: альбом целиком — страницы склеиваются, альбом и исполнитель альбома подставлены", async (env) => {

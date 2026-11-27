@@ -265,6 +265,16 @@
     return out;
   }
 
+  // подсказки к кодам ошибок Last.fm: что делать, а не только что случилось
+  var LASTFM_HINTS = {
+    4: "Войдите в Last.fm заново на вкладке «Профиль».",
+    9: "Сессия недействительна: войдите в Last.fm заново на вкладке «Профиль».",
+    10: "Проверьте API key на вкладке «Профиль».",
+    13: "Проверьте Shared secret на вкладке «Профиль».",
+    26: "Last.fm заблокировал этот API key: создайте новый ключ на last.fm/api/account/create.",
+    29: "Превышен лимит запросов, подождите несколько минут."
+  };
+
   var PLAYLIST_FORBIDDEN = "Spotify не отдаёт содержимое этого плейлиста: с февраля 2026 доступны только ваши собственные и совместные плейлисты.";
   var RELOGIN = "Сессия Spotify истекла. Войдите заново на вкладке «Профиль».";
 
@@ -312,7 +322,7 @@
         : await fetchJson("GET", lfmUrl + "?" + body, {}, "");
       var data = r.data;
       if (data && typeof data === "object" && "error" in data) {
-        throw new ApiError("Last.fm [" + data.error + "]: " + data.message, data.error);
+        throw new ApiError("Last.fm [" + data.error + "]: " + data.message + (LASTFM_HINTS[data.error] ? ". " + LASTFM_HINTS[data.error] : ""), data.error);
       }
       return data;
     }
@@ -417,10 +427,20 @@
     // --- Spotify ---
 
     function spError(r) {
-      if (r.status === 429) return new ApiError("Spotify: слишком много запросов, подождите минуту.", 429);
       var err = r.data && r.data.error;
+      if (r.status === 429) {
+        // с июля 2026 Spotify отличает исчерпанную квоту приложения от обычного ограничения частоты
+        var reason = (err && typeof err === "object" && err.reason) || (r.data && r.data.reason);
+        if (reason === "QUOTA_EXCEEDED") {
+          return new ApiError("Spotify: исчерпана квота Development Mode. Она общая для всех ваших приложений на developer.spotify.com; подождите и повторите позже.", 429);
+        }
+        return new ApiError("Spotify: слишком много запросов, подождите минуту.", 429);
+      }
       var msg = err && typeof err === "object" ? err.message : err;
-      return new ApiError("Spotify: HTTP " + r.status + (msg ? " — " + msg : ""), r.status);
+      var hint = r.status === 403
+        ? ". Проверьте, что у владельца приложения на developer.spotify.com активна подписка Premium: без неё Development Mode не работает."
+        : "";
+      return new ApiError("Spotify: HTTP " + r.status + (msg ? " — " + msg : "") + hint, r.status);
     }
 
     var FORM = { "Content-Type": "application/x-www-form-urlencoded" };

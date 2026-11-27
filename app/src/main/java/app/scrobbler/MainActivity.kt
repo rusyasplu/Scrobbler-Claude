@@ -160,7 +160,7 @@ class MainActivity : Activity() {
                     conn.requestMethod = method
                     conn.connectTimeout = 20_000
                     conn.readTimeout = 30_000
-                    conn.setRequestProperty("User-Agent", "LastfmScrobbler/1.1 (Android)")
+                    conn.setRequestProperty("User-Agent", "LastfmScrobbler/1.1.1 (Android)")
                     val headers = JSONObject(headersJson)
                     for (key in headers.keys()) {
                         conn.setRequestProperty(key, headers.getString(key))
